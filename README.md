@@ -64,7 +64,7 @@ devuelve el propio flujo de login de Nextcloud.
   crearía una cuenta nueva en vez de reconocer la existente.
 
 
-## Compatibilidad verificada en código
+## Compatibilidad objetivo
 
 La configuración generada sigue el esquema usado por Nextcloud Desktop 34.x
 (`version=13`, autenticación `webflow` y clave de QtKeychain con ID de cuenta).
