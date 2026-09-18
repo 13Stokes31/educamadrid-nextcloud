@@ -198,13 +198,41 @@ fn run_login_flow() -> Result<LoginResult, String> {
 // ---------- Configuración de cuenta ----------
 
 fn setup_account(result: LoginResult) -> Result<(), String> {
+    let existing_account_id =
+        configured_account_id(&result.login_name, &result.server)?;
+
+    stop_nextcloud_if_running()?;
+
+    if let Some(account_id) = existing_account_id {
+        store_in_kwallet(
+            &result.login_name,
+            &result.server,
+            &account_id,
+            &result.app_password,
+        )?;
+
+        std::process::Command::new("nextcloud")
+            .spawn()
+            .map_err(|e| format!("No se pudo iniciar nextcloud: {e}"))?;
+        return Ok(());
+    }
+
     let home = dirs::home_dir().ok_or("No se puede obtener el directorio home")?;
     let sync_dir = home.join(format!("Cloud - {}", result.login_name));
 
+    if sync_dir.exists() {
+        let mut entries = std::fs::read_dir(&sync_dir)
+            .map_err(|e| format!("No se puede revisar la carpeta de sincronización: {e}"))?;
+        if entries.next().is_some() {
+            return Err(format!(
+                "La carpeta {} ya existe y contiene archivos; no se usará automáticamente",
+                sync_dir.display()
+            ));
+        }
+    }
+
     std::fs::create_dir_all(&sync_dir)
         .map_err(|e| format!("Error creando carpeta de sincronización: {e}"))?;
-
-    stop_nextcloud_if_running()?;
 
     let account_id = write_nextcloud_config(&result.login_name, &result.server, &sync_dir)?;
     store_in_kwallet(
@@ -291,6 +319,21 @@ fn stop_nextcloud_if_running() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn configured_account_id(username: &str, server: &str) -> Result<Option<String>, String> {
+    let config_path = dirs::config_dir()
+        .ok_or("No se puede obtener el directorio de configuración")?
+        .join("Nextcloud")
+        .join("nextcloud.cfg");
+
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let existing = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Error leyendo configuración existente: {e}"))?;
+    Ok(find_account_id(&existing, username, server))
 }
 
 fn write_nextcloud_config(
