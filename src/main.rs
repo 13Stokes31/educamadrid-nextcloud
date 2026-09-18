@@ -204,6 +204,8 @@ fn setup_account(result: LoginResult) -> Result<(), String> {
     std::fs::create_dir_all(&sync_dir)
         .map_err(|e| format!("Error creando carpeta de sincronización: {e}"))?;
 
+    stop_nextcloud_if_running()?;
+
     let account_id = write_nextcloud_config(&result.login_name, &result.server, &sync_dir)?;
     store_in_kwallet(
         &result.login_name,
@@ -216,6 +218,56 @@ fn setup_account(result: LoginResult) -> Result<(), String> {
     std::process::Command::new("nextcloud")
         .spawn()
         .map_err(|e| format!("No se pudo iniciar nextcloud: {e}"))?;
+
+    Ok(())
+}
+
+fn is_nextcloud_running() -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+
+    entries.flatten().any(|entry| {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str() else {
+            return false;
+        };
+        if !pid.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+
+        std::fs::read_to_string(entry.path().join("comm"))
+            .map(|comm| comm.trim() == "nextcloud")
+            .unwrap_or(false)
+    })
+}
+
+fn stop_nextcloud_if_running() -> Result<(), String> {
+    if !is_nextcloud_running() {
+        return Ok(());
+    }
+
+    let status = std::process::Command::new("nextcloud")
+        .arg("--quit")
+        .status()
+        .map_err(|e| format!("No se pudo solicitar el cierre de Nextcloud: {e}"))?;
+
+    if !status.success() {
+        return Err(format!(
+            "Nextcloud no aceptó la orden de cierre (código {:?})",
+            status.code()
+        ));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while is_nextcloud_running() {
+        if Instant::now() >= deadline {
+            return Err(
+                "Nextcloud sigue ejecutándose; no se modificará su configuración".into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 
     Ok(())
 }
