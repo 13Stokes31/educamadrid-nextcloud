@@ -49,7 +49,11 @@ struct App {
 
 impl Default for App {
     fn default() -> Self {
-        Self { state: State::Ready, rx: None, close_at: None }
+        Self {
+            state: State::Ready,
+            rx: None,
+            close_at: None,
+        }
     }
 }
 
@@ -63,8 +67,7 @@ impl eframe::App for App {
                         match setup_account(result) {
                             Ok(_) => {
                                 self.state = State::Done(username);
-                                self.close_at =
-                                    Some(Instant::now() + Duration::from_secs(3));
+                                self.close_at = Some(Instant::now() + Duration::from_secs(3));
                             }
                             Err(e) => self.state = State::Error(e),
                         }
@@ -181,9 +184,7 @@ fn run_login_flow() -> Result<LoginResult, String> {
             return Err("Tiempo de espera agotado (10 minutos)".into());
         }
         std::thread::sleep(POLL_INTERVAL);
-        match ureq::post(&flow.poll.endpoint)
-            .send_form(&[("token", flow.poll.token.as_str())])
-        {
+        match ureq::post(&flow.poll.endpoint).send_form(&[("token", flow.poll.token.as_str())]) {
             Ok(resp) => {
                 return resp
                     .into_json()
@@ -198,8 +199,7 @@ fn run_login_flow() -> Result<LoginResult, String> {
 // ---------- Configuración de cuenta ----------
 
 fn setup_account(result: LoginResult) -> Result<(), String> {
-    let existing_account_id =
-        configured_account_id(&result.login_name, &result.server)?;
+    let existing_account_id = configured_account_id(&result.login_name, &result.server)?;
 
     stop_nextcloud_if_running()?;
 
@@ -311,9 +311,7 @@ fn stop_nextcloud_if_running() -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     while is_nextcloud_running() {
         if Instant::now() >= deadline {
-            return Err(
-                "Nextcloud sigue ejecutándose; no se modificará su configuración".into(),
-            );
+            return Err("Nextcloud sigue ejecutándose; no se modificará su configuración".into());
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -336,11 +334,7 @@ fn configured_account_id(username: &str, server: &str) -> Result<Option<String>,
     Ok(find_account_id(&existing, username, server))
 }
 
-fn write_nextcloud_config(
-    username: &str,
-    server: &str,
-    sync_dir: &Path,
-) -> Result<String, String> {
+fn write_nextcloud_config(username: &str, server: &str, sync_dir: &Path) -> Result<String, String> {
     let config_dir = dirs::config_dir()
         .ok_or("No se puede obtener el directorio de configuración")?
         .join("Nextcloud");
@@ -408,7 +402,12 @@ fn write_nextcloud_config(
 
     // Insertar antes del marcador "version=13" de sección (sin prefijo numérico)
     let updated = if let Some(pos) = existing.rfind("\nversion=13") {
-        format!("{}\n{}{}", &existing[..pos], new_lines, &existing[pos + 1..])
+        format!(
+            "{}\n{}{}",
+            &existing[..pos],
+            new_lines,
+            &existing[pos + 1..]
+        )
     } else if existing.ends_with('\n') {
         format!("{existing}{new_lines}")
     } else {
@@ -465,8 +464,8 @@ fn store_in_kwallet(
     account_id: &str,
     password: &str,
 ) -> Result<(), String> {
-    let conn = Connection::new_session()
-        .map_err(|e| format!("Error abriendo sesión D-Bus: {e}"))?;
+    let conn =
+        Connection::new_session().map_err(|e| format!("Error abriendo sesión D-Bus: {e}"))?;
 
     let key = nextcloud_keychain_key(username, server, account_id);
     let backends = [
@@ -505,7 +504,13 @@ fn store_in_kwallet(
             .method_call(
                 "org.kde.KWallet",
                 "writePassword",
-                (handle, "Nextcloud", key.as_str(), password, "nextcloud-educamadrid"),
+                (
+                    handle,
+                    "Nextcloud",
+                    key.as_str(),
+                    password,
+                    "nextcloud-educamadrid",
+                ),
             )
             .map_err(|e| format!("KWallet writePassword: {e}"))?;
 
@@ -530,14 +535,9 @@ fn percent_encode_path(path: &str) -> String {
     let mut encoded = String::with_capacity(path.len());
     for &byte in path.as_bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'/'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => encoded.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
             _ => encoded.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -606,7 +606,6 @@ fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,7 +645,8 @@ mod tests {
             None
         );
 
-        let webflow_only = "[Accounts]\n3\\webflow_user=alice\n3\\url=https://cloud.educa.madrid.org/\n";
+        let webflow_only =
+            "[Accounts]\n3\\webflow_user=alice\n3\\url=https://cloud.educa.madrid.org/\n";
         assert_eq!(
             find_account_id(webflow_only, "alice", "https://cloud.educa.madrid.org"),
             Some("3".into())
