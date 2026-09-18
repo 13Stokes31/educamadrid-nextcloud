@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 const SERVER_URL: &str = "https://cloud.educa.madrid.org/";
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
-const POLL_TIMEOUT: Duration = Duration::from_secs(300);
+const POLL_TIMEOUT: Duration = Duration::from_secs(600);
 
 // ---------- Nextcloud Login Flow v2 ----------
 
@@ -178,7 +178,7 @@ fn run_login_flow() -> Result<LoginResult, String> {
     let start = Instant::now();
     loop {
         if start.elapsed() > POLL_TIMEOUT {
-            return Err("Tiempo de espera agotado (5 minutos)".into());
+            return Err("Tiempo de espera agotado (10 minutos)".into());
         }
         std::thread::sleep(POLL_INTERVAL);
         match ureq::post(&flow.poll.endpoint)
