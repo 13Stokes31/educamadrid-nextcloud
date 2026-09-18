@@ -333,45 +333,54 @@ fn store_in_kwallet(
     let conn = Connection::new_session()
         .map_err(|e| format!("Error abriendo sesión D-Bus: {e}"))?;
 
-    let dbus_proxy = conn.with_proxy(
-        "org.freedesktop.DBus",
-        "/org/freedesktop/DBus",
-        Duration::from_secs(3),
-    );
-    let (names,): (Vec<String>,) = dbus_proxy
-        .method_call("org.freedesktop.DBus", "ListNames", ())
-        .unwrap_or_default();
+    let key = format!("{username}:{server}:{account_id}");
+    let backends = [
+        ("org.kde.kwalletd6", "/modules/kwalletd6"),
+        ("org.kde.kwalletd5", "/modules/kwalletd5"),
+    ];
+    let mut errors = Vec::new();
 
-    let (service, obj) = if names.iter().any(|n| n == "org.kde.kwalletd6") {
-        ("org.kde.kwalletd6", "/modules/kwalletd6")
-    } else {
-        ("org.kde.kwalletd5", "/modules/kwalletd5")
-    };
+    for (service, obj) in backends {
+        let proxy = conn.with_proxy(service, obj, Duration::from_secs(10));
 
-    let proxy = conn.with_proxy(service, obj, Duration::from_secs(10));
+        // La llamada activa kwalletd mediante D-Bus si todavía no estaba arrancado.
+        let wallet_result: Result<(String,), _> =
+            proxy.method_call("org.kde.KWallet", "networkWallet", ());
+        let (wallet_name,) = match wallet_result {
+            Ok(wallet) => wallet,
+            Err(e) => {
+                errors.push(format!("{service}: {e}"));
+                continue;
+            }
+        };
 
-    let (handle,): (i32,) = proxy
-        .method_call(
-            "org.kde.KWallet",
-            "open",
-            ("kdewallet", 0i64, "nextcloud-educamadrid"),
-        )
-        .map_err(|e| format!("KWallet open: {e}"))?;
+        let (handle,): (i32,) = proxy
+            .method_call(
+                "org.kde.KWallet",
+                "open",
+                (wallet_name.as_str(), 0i64, "nextcloud-educamadrid"),
+            )
+            .map_err(|e| format!("KWallet open: {e}"))?;
 
-    if handle < 0 {
-        return Err("KWallet rechazó la apertura del monedero".into());
+        if handle < 0 {
+            return Err("KWallet rechazó la apertura del monedero".into());
+        }
+
+        let _: (i32,) = proxy
+            .method_call(
+                "org.kde.KWallet",
+                "writePassword",
+                (handle, "Nextcloud", key.as_str(), password, "nextcloud-educamadrid"),
+            )
+            .map_err(|e| format!("KWallet writePassword: {e}"))?;
+
+        return Ok(());
     }
 
-    let key = format!("{username}:{server}:{account_id}");
-    let _: (i32,) = proxy
-        .method_call(
-            "org.kde.KWallet",
-            "writePassword",
-            (handle, "Nextcloud", key.as_str(), password, "nextcloud-educamadrid"),
-        )
-        .map_err(|e| format!("KWallet writePassword: {e}"))?;
-
-    Ok(())
+    Err(format!(
+        "No se pudo acceder a KWallet 6 ni KWallet 5: {}",
+        errors.join(" | ")
+    ))
 }
 
 // ---------- Marcador en Dolphin ----------
