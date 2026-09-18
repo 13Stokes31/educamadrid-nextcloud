@@ -366,8 +366,10 @@ fn write_nextcloud_config(
     // Insertar antes del marcador "version=13" de sección (sin prefijo numérico)
     let updated = if let Some(pos) = existing.rfind("\nversion=13") {
         format!("{}\n{}{}", &existing[..pos], new_lines, &existing[pos + 1..])
-    } else {
+    } else if existing.ends_with('\n') {
         format!("{existing}{new_lines}")
+    } else {
+        format!("{existing}\n{new_lines}")
     };
 
     std::fs::write(&config_path, updated)
@@ -376,18 +378,31 @@ fn write_nextcloud_config(
 }
 
 fn find_account_id(existing: &str, username: &str, server: &str) -> Option<String> {
-    let user_suffix = format!("\\dav_user={username}");
-    for line in existing.lines() {
-        let Some(account_id) = line.strip_suffix(&user_suffix) else {
-            continue;
-        };
-        if account_id.is_empty() || account_id.contains('\\') {
-            continue;
-        }
+    let normalized_server = server.trim_end_matches('/');
+    let user_suffixes = [
+        format!("\\webflow_user={username}"),
+        format!("\\dav_user={username}"),
+    ];
 
-        let expected_url = format!("{account_id}\\url={server}");
-        if existing.lines().any(|candidate| candidate == expected_url.as_str()) {
-            return Some(account_id.to_string());
+    for line in existing.lines() {
+        for user_suffix in &user_suffixes {
+            let Some(account_id) = line.strip_suffix(user_suffix) else {
+                continue;
+            };
+            if account_id.is_empty() || account_id.contains('\\') {
+                continue;
+            }
+
+            let url_prefix = format!("{account_id}\\url=");
+            let same_server = existing.lines().any(|candidate| {
+                candidate
+                    .strip_prefix(&url_prefix)
+                    .map(|url| url.trim_end_matches('/') == normalized_server)
+                    .unwrap_or(false)
+            });
+            if same_server {
+                return Some(account_id.to_string());
+            }
         }
     }
     None
@@ -580,8 +595,18 @@ mod tests {
             Some("2".into())
         );
         assert_eq!(
+            find_account_id(config, "alice", "https://cloud.educa.madrid.org/"),
+            Some("2".into())
+        );
+        assert_eq!(
             find_account_id(config, "carol", "https://cloud.educa.madrid.org"),
             None
+        );
+
+        let webflow_only = "[Accounts]\n3\\webflow_user=alice\n3\\url=https://cloud.educa.madrid.org/\n";
+        assert_eq!(
+            find_account_id(webflow_only, "alice", "https://cloud.educa.madrid.org"),
+            Some("3".into())
         );
     }
 
