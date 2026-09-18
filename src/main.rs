@@ -222,7 +222,20 @@ fn setup_account(result: LoginResult) -> Result<(), String> {
     Ok(())
 }
 
+fn effective_uid(status: &str) -> Option<u32> {
+    let line = status.lines().find(|line| line.starts_with("Uid:"))?;
+    line.split_whitespace().nth(2)?.parse().ok()
+}
+
 fn is_nextcloud_running() -> bool {
+    let self_uid = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| effective_uid(&status));
+
+    let Some(self_uid) = self_uid else {
+        return false;
+    };
+
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return false;
     };
@@ -236,9 +249,17 @@ fn is_nextcloud_running() -> bool {
             return false;
         }
 
-        std::fs::read_to_string(entry.path().join("comm"))
+        let comm_matches = std::fs::read_to_string(entry.path().join("comm"))
             .map(|comm| comm.trim() == "nextcloud")
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if !comm_matches {
+            return false;
+        }
+
+        std::fs::read_to_string(entry.path().join("status"))
+            .ok()
+            .and_then(|status| effective_uid(&status))
+            == Some(self_uid)
     })
 }
 
@@ -365,7 +386,7 @@ fn find_account_id(existing: &str, username: &str, server: &str) -> Option<Strin
         }
 
         let expected_url = format!("{account_id}\\url={server}");
-        if existing.lines().any(|candidate| candidate == expected_url) {
+        if existing.lines().any(|candidate| candidate == expected_url.as_str()) {
             return Some(account_id.to_string());
         }
     }
