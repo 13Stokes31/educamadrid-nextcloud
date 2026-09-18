@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 const SERVER_URL: &str = "https://cloud.educa.madrid.org/";
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
-const POLL_TIMEOUT: Duration = Duration::from_secs(300);
+const POLL_TIMEOUT: Duration = Duration::from_secs(600);
 
 // ---------- Nextcloud Login Flow v2 ----------
 
@@ -49,7 +49,11 @@ struct App {
 
 impl Default for App {
     fn default() -> Self {
-        Self { state: State::Ready, rx: None, close_at: None }
+        Self {
+            state: State::Ready,
+            rx: None,
+            close_at: None,
+        }
     }
 }
 
@@ -63,8 +67,7 @@ impl eframe::App for App {
                         match setup_account(result) {
                             Ok(_) => {
                                 self.state = State::Done(username);
-                                self.close_at =
-                                    Some(Instant::now() + Duration::from_secs(3));
+                                self.close_at = Some(Instant::now() + Duration::from_secs(3));
                             }
                             Err(e) => self.state = State::Error(e),
                         }
@@ -178,12 +181,10 @@ fn run_login_flow() -> Result<LoginResult, String> {
     let start = Instant::now();
     loop {
         if start.elapsed() > POLL_TIMEOUT {
-            return Err("Tiempo de espera agotado (5 minutos)".into());
+            return Err("Tiempo de espera agotado (10 minutos)".into());
         }
         std::thread::sleep(POLL_INTERVAL);
-        match ureq::post(&flow.poll.endpoint)
-            .send_form(&[("token", flow.poll.token.as_str())])
-        {
+        match ureq::post(&flow.poll.endpoint).send_form(&[("token", flow.poll.token.as_str())]) {
             Ok(resp) => {
                 return resp
                     .into_json()
@@ -198,14 +199,48 @@ fn run_login_flow() -> Result<LoginResult, String> {
 // ---------- Configuración de cuenta ----------
 
 fn setup_account(result: LoginResult) -> Result<(), String> {
+    let existing_account_id = configured_account_id(&result.login_name, &result.server)?;
+
+    stop_nextcloud_if_running()?;
+
+    if let Some(account_id) = existing_account_id {
+        store_in_kwallet(
+            &result.login_name,
+            &result.server,
+            &account_id,
+            &result.app_password,
+        )?;
+
+        std::process::Command::new("nextcloud")
+            .spawn()
+            .map_err(|e| format!("No se pudo iniciar nextcloud: {e}"))?;
+        return Ok(());
+    }
+
     let home = dirs::home_dir().ok_or("No se puede obtener el directorio home")?;
     let sync_dir = home.join(format!("Cloud - {}", result.login_name));
+
+    if sync_dir.exists() {
+        let mut entries = std::fs::read_dir(&sync_dir)
+            .map_err(|e| format!("No se puede revisar la carpeta de sincronización: {e}"))?;
+        if entries.next().is_some() {
+            return Err(format!(
+                "La carpeta {} ya existe y contiene archivos; no se usará automáticamente",
+                sync_dir.display()
+            ));
+        }
+    }
 
     std::fs::create_dir_all(&sync_dir)
         .map_err(|e| format!("Error creando carpeta de sincronización: {e}"))?;
 
-    write_nextcloud_config(&result.login_name, &result.server, &sync_dir)?;
-    store_in_kwallet(&result.login_name, &result.server, &result.app_password)?;
+    let account_id = write_nextcloud_config(&result.login_name, &result.server, &sync_dir)?;
+    store_in_kwallet(
+        &result.login_name,
+        &result.server,
+        &account_id,
+        &result.app_password,
+    )?;
     add_dolphin_bookmark(&result.login_name, &sync_dir)?;
 
     std::process::Command::new("nextcloud")
@@ -215,11 +250,91 @@ fn setup_account(result: LoginResult) -> Result<(), String> {
     Ok(())
 }
 
-fn write_nextcloud_config(
-    username: &str,
-    server: &str,
-    sync_dir: &Path,
-) -> Result<(), String> {
+fn effective_uid(status: &str) -> Option<u32> {
+    let line = status.lines().find(|line| line.starts_with("Uid:"))?;
+    line.split_whitespace().nth(2)?.parse().ok()
+}
+
+fn is_nextcloud_running() -> bool {
+    let self_uid = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| effective_uid(&status));
+
+    let Some(self_uid) = self_uid else {
+        return false;
+    };
+
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+
+    entries.flatten().any(|entry| {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str() else {
+            return false;
+        };
+        if !pid.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+
+        let comm_matches = std::fs::read_to_string(entry.path().join("comm"))
+            .map(|comm| comm.trim() == "nextcloud")
+            .unwrap_or(false);
+        if !comm_matches {
+            return false;
+        }
+
+        std::fs::read_to_string(entry.path().join("status"))
+            .ok()
+            .and_then(|status| effective_uid(&status))
+            == Some(self_uid)
+    })
+}
+
+fn stop_nextcloud_if_running() -> Result<(), String> {
+    if !is_nextcloud_running() {
+        return Ok(());
+    }
+
+    let status = std::process::Command::new("nextcloud")
+        .arg("--quit")
+        .status()
+        .map_err(|e| format!("No se pudo solicitar el cierre de Nextcloud: {e}"))?;
+
+    if !status.success() {
+        return Err(format!(
+            "Nextcloud no aceptó la orden de cierre (código {:?})",
+            status.code()
+        ));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while is_nextcloud_running() {
+        if Instant::now() >= deadline {
+            return Err("Nextcloud sigue ejecutándose; no se modificará su configuración".into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    Ok(())
+}
+
+fn configured_account_id(username: &str, server: &str) -> Result<Option<String>, String> {
+    let config_path = dirs::config_dir()
+        .ok_or("No se puede obtener el directorio de configuración")?
+        .join("Nextcloud")
+        .join("nextcloud.cfg");
+
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let existing = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Error leyendo configuración existente: {e}"))?;
+    Ok(find_account_id(&existing, username, server))
+}
+
+fn write_nextcloud_config(username: &str, server: &str, sync_dir: &Path) -> Result<String, String> {
     let config_dir = dirs::config_dir()
         .ok_or("No se puede obtener el directorio de configuración")?
         .join("Nextcloud");
@@ -250,22 +365,24 @@ fn write_nextcloud_config(
              0\\Folders\\1\\virtualFilesMode=off\n\
              version=13\n"
         );
-        return std::fs::write(&config_path, content)
-            .map_err(|e| format!("Error escribiendo configuración: {e}"));
+        std::fs::write(&config_path, content)
+            .map_err(|e| format!("Error escribiendo configuración: {e}"))?;
+        return Ok("0".into());
     }
 
     let existing = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("Error leyendo configuración existente: {e}"))?;
 
-    if existing.contains(&format!("\\dav_user={username}"))
-        && existing.contains(&format!("\\url={server}"))
-    {
-        return Ok(());
+    if let Some(account_id) = find_account_id(&existing, username, server) {
+        return Ok(account_id);
     }
 
-    // Siguiente índice libre: buscar cuántos {n}\ hay en [Accounts]
+    // Siguiente índice libre de cuenta.
     let mut idx = 0;
-    while existing.contains(&format!("\n{idx}\\")) {
+    while existing
+        .lines()
+        .any(|line| line.starts_with(&format!("{idx}\\")))
+    {
         idx += 1;
     }
 
@@ -285,66 +402,156 @@ fn write_nextcloud_config(
 
     // Insertar antes del marcador "version=13" de sección (sin prefijo numérico)
     let updated = if let Some(pos) = existing.rfind("\nversion=13") {
-        format!("{}\n{}{}", &existing[..pos], new_lines, &existing[pos + 1..])
-    } else {
+        format!(
+            "{}\n{}{}",
+            &existing[..pos],
+            new_lines,
+            &existing[pos + 1..]
+        )
+    } else if existing.ends_with('\n') {
         format!("{existing}{new_lines}")
+    } else {
+        format!("{existing}\n{new_lines}")
     };
 
     std::fs::write(&config_path, updated)
         .map_err(|e| format!("Error actualizando configuración: {e}"))?;
-    Ok(())
+    Ok(idx.to_string())
+}
+
+fn find_account_id(existing: &str, username: &str, server: &str) -> Option<String> {
+    let normalized_server = server.trim_end_matches('/');
+    let user_suffixes = [
+        format!("\\webflow_user={username}"),
+        format!("\\dav_user={username}"),
+    ];
+
+    for line in existing.lines() {
+        for user_suffix in &user_suffixes {
+            let Some(account_id) = line.strip_suffix(user_suffix) else {
+                continue;
+            };
+            if account_id.is_empty() || account_id.contains('\\') {
+                continue;
+            }
+
+            let url_prefix = format!("{account_id}\\url=");
+            let same_server = existing.lines().any(|candidate| {
+                candidate
+                    .strip_prefix(&url_prefix)
+                    .map(|url| url.trim_end_matches('/') == normalized_server)
+                    .unwrap_or(false)
+            });
+            if same_server {
+                return Some(account_id.to_string());
+            }
+        }
+    }
+    None
 }
 
 // nextcloud-client en KDE usa KWallet directamente vía D-Bus (QtKeychain),
 // no la Secret Service API. Escribimos en KWallet con la misma clave que
-// busca nextcloud: "loginName:serverUrl" en la carpeta "Nextcloud".
-fn store_in_kwallet(username: &str, server: &str, password: &str) -> Result<(), String> {
-    let server = server.trim_end_matches('/');
-    let conn = Connection::new_session()
-        .map_err(|e| format!("Error abriendo sesión D-Bus: {e}"))?;
+// busca nextcloud: "loginName:serverUrl/:accountId" en la carpeta "Nextcloud".
+fn nextcloud_keychain_key(username: &str, server: &str, account_id: &str) -> String {
+    let server = format!("{}/", server.trim_end_matches('/'));
+    format!("{username}:{server}:{account_id}")
+}
 
-    let dbus_proxy = conn.with_proxy(
-        "org.freedesktop.DBus",
-        "/org/freedesktop/DBus",
-        Duration::from_secs(3),
-    );
-    let (names,): (Vec<String>,) = dbus_proxy
-        .method_call("org.freedesktop.DBus", "ListNames", ())
-        .unwrap_or_default();
+fn store_in_kwallet(
+    username: &str,
+    server: &str,
+    account_id: &str,
+    password: &str,
+) -> Result<(), String> {
+    let conn =
+        Connection::new_session().map_err(|e| format!("Error abriendo sesión D-Bus: {e}"))?;
 
-    let (service, obj) = if names.iter().any(|n| n == "org.kde.kwalletd6") {
-        ("org.kde.kwalletd6", "/modules/kwalletd6")
-    } else {
-        ("org.kde.kwalletd5", "/modules/kwalletd5")
-    };
+    let key = nextcloud_keychain_key(username, server, account_id);
+    let backends = [
+        ("org.kde.kwalletd6", "/modules/kwalletd6"),
+        ("org.kde.kwalletd5", "/modules/kwalletd5"),
+    ];
+    let mut errors = Vec::new();
 
-    let proxy = conn.with_proxy(service, obj, Duration::from_secs(10));
+    for (service, obj) in backends {
+        let proxy = conn.with_proxy(service, obj, Duration::from_secs(10));
 
-    let (handle,): (i32,) = proxy
-        .method_call(
-            "org.kde.KWallet",
-            "open",
-            ("kdewallet", 0i64, "nextcloud-educamadrid"),
-        )
-        .map_err(|e| format!("KWallet open: {e}"))?;
+        // La llamada activa kwalletd mediante D-Bus si todavía no estaba arrancado.
+        let wallet_result: Result<(String,), _> =
+            proxy.method_call("org.kde.KWallet", "networkWallet", ());
+        let (wallet_name,) = match wallet_result {
+            Ok(wallet) => wallet,
+            Err(e) => {
+                errors.push(format!("{service}: {e}"));
+                continue;
+            }
+        };
 
-    if handle < 0 {
-        return Err("KWallet rechazó la apertura del monedero".into());
+        let (handle,): (i32,) = proxy
+            .method_call(
+                "org.kde.KWallet",
+                "open",
+                (wallet_name.as_str(), 0i64, "nextcloud-educamadrid"),
+            )
+            .map_err(|e| format!("KWallet open: {e}"))?;
+
+        if handle < 0 {
+            return Err("KWallet rechazó la apertura del monedero".into());
+        }
+
+        let (write_result,): (i32,) = proxy
+            .method_call(
+                "org.kde.KWallet",
+                "writePassword",
+                (
+                    handle,
+                    "Nextcloud",
+                    key.as_str(),
+                    password,
+                    "nextcloud-educamadrid",
+                ),
+            )
+            .map_err(|e| format!("KWallet writePassword: {e}"))?;
+
+        if write_result != 0 {
+            return Err(format!(
+                "KWallet no pudo guardar la contraseña (código {write_result})"
+            ));
+        }
+
+        return Ok(());
     }
 
-    let key = format!("{username}:{server}");
-    let _: (i32,) = proxy
-        .method_call(
-            "org.kde.KWallet",
-            "writePassword",
-            (handle, "Nextcloud", key.as_str(), password, "nextcloud-educamadrid"),
-        )
-        .map_err(|e| format!("KWallet writePassword: {e}"))?;
-
-    Ok(())
+    Err(format!(
+        "No se pudo acceder a KWallet 6 ni KWallet 5: {}",
+        errors.join(" | ")
+    ))
 }
 
 // ---------- Marcador en Dolphin ----------
+
+fn percent_encode_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for &byte in path.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
 
 fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
     let places_path = dirs::data_local_dir()
@@ -352,9 +559,9 @@ fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
         .join("user-places.xbel");
 
     let path_str = sync_dir.to_string_lossy();
-    let encoded = path_str.replace(' ', "%20");
-    let href = format!("file://{encoded}");
-    let title = format!("Cloud - {username}");
+    let href = format!("file://{}", percent_encode_path(&path_str));
+    let href_xml = xml_escape(&href);
+    let title = xml_escape(&format!("Cloud - {username}"));
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -362,7 +569,7 @@ fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
         .as_secs();
 
     let entry = format!(
-        " <bookmark href=\"{href}\">\n  \
+        " <bookmark href=\"{href_xml}\">\n  \
            <title>{title}</title>\n  \
            <info>\n   \
              <metadata owner=\"http://freedesktop.org\">\n    \
@@ -379,7 +586,7 @@ fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
     let content = if places_path.exists() {
         let existing = std::fs::read_to_string(&places_path)
             .map_err(|e| format!("Error leyendo user-places.xbel: {e}"))?;
-        if existing.contains(&format!("href=\"{href}\"")) {
+        if existing.contains(&format!("href=\"{href_xml}\"")) {
             return Ok(());
         }
         existing.replace("</xbel>", &format!("{entry}</xbel>"))
@@ -397,4 +604,67 @@ fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
     std::fs::write(&places_path, content)
         .map_err(|e| format!("Error escribiendo user-places.xbel: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keychain_key_matches_nextcloud_34_format() {
+        assert_eq!(
+            nextcloud_keychain_key("alice", "https://cloud.educa.madrid.org", "0"),
+            "alice:https://cloud.educa.madrid.org/:0"
+        );
+        assert_eq!(
+            nextcloud_keychain_key("alice", "https://cloud.educa.madrid.org/", "3"),
+            "alice:https://cloud.educa.madrid.org/:3"
+        );
+    }
+
+    #[test]
+    fn finds_only_the_matching_account() {
+        let config = "[Accounts]\n\
+                      0\\dav_user=alice\n\
+                      0\\url=https://otro.example\n\
+                      1\\dav_user=bob\n\
+                      1\\url=https://cloud.educa.madrid.org\n\
+                      2\\dav_user=alice\n\
+                      2\\url=https://cloud.educa.madrid.org\n";
+
+        assert_eq!(
+            find_account_id(config, "alice", "https://cloud.educa.madrid.org"),
+            Some("2".into())
+        );
+        assert_eq!(
+            find_account_id(config, "alice", "https://cloud.educa.madrid.org/"),
+            Some("2".into())
+        );
+        assert_eq!(
+            find_account_id(config, "carol", "https://cloud.educa.madrid.org"),
+            None
+        );
+
+        let webflow_only =
+            "[Accounts]\n3\\webflow_user=alice\n3\\url=https://cloud.educa.madrid.org/\n";
+        assert_eq!(
+            find_account_id(webflow_only, "alice", "https://cloud.educa.madrid.org"),
+            Some("3".into())
+        );
+    }
+
+    #[test]
+    fn parses_effective_uid_from_proc_status() {
+        let status = "Name:\ttest\nUid:\t1000\t1001\t1002\t1003\n";
+        assert_eq!(effective_uid(status), Some(1001));
+    }
+
+    #[test]
+    fn encodes_dolphin_paths_and_xml() {
+        assert_eq!(
+            percent_encode_path("/home/alumno/Cloud - josé"),
+            "/home/alumno/Cloud%20-%20jos%C3%A9"
+        );
+        assert_eq!(xml_escape("A&B <test>"), "A&amp;B &lt;test&gt;");
+    }
 }
