@@ -396,17 +396,21 @@ fn find_account_id(existing: &str, username: &str, server: &str) -> Option<Strin
 // nextcloud-client en KDE usa KWallet directamente vía D-Bus (QtKeychain),
 // no la Secret Service API. Escribimos en KWallet con la misma clave que
 // busca nextcloud: "loginName:serverUrl/:accountId" en la carpeta "Nextcloud".
+fn nextcloud_keychain_key(username: &str, server: &str, account_id: &str) -> String {
+    let server = format!("{}/", server.trim_end_matches('/'));
+    format!("{username}:{server}:{account_id}")
+}
+
 fn store_in_kwallet(
     username: &str,
     server: &str,
     account_id: &str,
     password: &str,
 ) -> Result<(), String> {
-    let server = format!("{}/", server.trim_end_matches('/'));
     let conn = Connection::new_session()
         .map_err(|e| format!("Error abriendo sesión D-Bus: {e}"))?;
 
-    let key = format!("{username}:{server}:{account_id}");
+    let key = nextcloud_keychain_key(username, server, account_id);
     let backends = [
         ("org.kde.kwalletd6", "/modules/kwalletd6"),
         ("org.kde.kwalletd5", "/modules/kwalletd5"),
@@ -515,4 +519,48 @@ fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
     std::fs::write(&places_path, content)
         .map_err(|e| format!("Error escribiendo user-places.xbel: {e}"))?;
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keychain_key_matches_nextcloud_34_format() {
+        assert_eq!(
+            nextcloud_keychain_key("alice", "https://cloud.educa.madrid.org", "0"),
+            "alice:https://cloud.educa.madrid.org/:0"
+        );
+        assert_eq!(
+            nextcloud_keychain_key("alice", "https://cloud.educa.madrid.org/", "3"),
+            "alice:https://cloud.educa.madrid.org/:3"
+        );
+    }
+
+    #[test]
+    fn finds_only_the_matching_account() {
+        let config = "[Accounts]\n\
+                      0\\dav_user=alice\n\
+                      0\\url=https://otro.example\n\
+                      1\\dav_user=bob\n\
+                      1\\url=https://cloud.educa.madrid.org\n\
+                      2\\dav_user=alice\n\
+                      2\\url=https://cloud.educa.madrid.org\n";
+
+        assert_eq!(
+            find_account_id(config, "alice", "https://cloud.educa.madrid.org"),
+            Some("2".into())
+        );
+        assert_eq!(
+            find_account_id(config, "carol", "https://cloud.educa.madrid.org"),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_effective_uid_from_proc_status() {
+        let status = "Name:\ttest\nUid:\t1000\t1001\t1002\t1003\n";
+        assert_eq!(effective_uid(status), Some(1001));
+    }
 }
