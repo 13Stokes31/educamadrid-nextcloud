@@ -204,8 +204,13 @@ fn setup_account(result: LoginResult) -> Result<(), String> {
     std::fs::create_dir_all(&sync_dir)
         .map_err(|e| format!("Error creando carpeta de sincronización: {e}"))?;
 
-    write_nextcloud_config(&result.login_name, &result.server, &sync_dir)?;
-    store_in_kwallet(&result.login_name, &result.server, &result.app_password)?;
+    let account_id = write_nextcloud_config(&result.login_name, &result.server, &sync_dir)?;
+    store_in_kwallet(
+        &result.login_name,
+        &result.server,
+        &account_id,
+        &result.app_password,
+    )?;
     add_dolphin_bookmark(&result.login_name, &sync_dir)?;
 
     std::process::Command::new("nextcloud")
@@ -219,7 +224,7 @@ fn write_nextcloud_config(
     username: &str,
     server: &str,
     sync_dir: &Path,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let config_dir = dirs::config_dir()
         .ok_or("No se puede obtener el directorio de configuración")?
         .join("Nextcloud");
@@ -250,22 +255,24 @@ fn write_nextcloud_config(
              0\\Folders\\1\\virtualFilesMode=off\n\
              version=13\n"
         );
-        return std::fs::write(&config_path, content)
-            .map_err(|e| format!("Error escribiendo configuración: {e}"));
+        std::fs::write(&config_path, content)
+            .map_err(|e| format!("Error escribiendo configuración: {e}"))?;
+        return Ok("0".into());
     }
 
     let existing = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("Error leyendo configuración existente: {e}"))?;
 
-    if existing.contains(&format!("\\dav_user={username}"))
-        && existing.contains(&format!("\\url={server}"))
-    {
-        return Ok(());
+    if let Some(account_id) = find_account_id(&existing, username, server) {
+        return Ok(account_id);
     }
 
-    // Siguiente índice libre: buscar cuántos {n}\ hay en [Accounts]
+    // Siguiente índice libre de cuenta.
     let mut idx = 0;
-    while existing.contains(&format!("\n{idx}\\")) {
+    while existing
+        .lines()
+        .any(|line| line.starts_with(&format!("{idx}\\")))
+    {
         idx += 1;
     }
 
@@ -292,14 +299,37 @@ fn write_nextcloud_config(
 
     std::fs::write(&config_path, updated)
         .map_err(|e| format!("Error actualizando configuración: {e}"))?;
-    Ok(())
+    Ok(idx.to_string())
+}
+
+fn find_account_id(existing: &str, username: &str, server: &str) -> Option<String> {
+    let user_suffix = format!("\\dav_user={username}");
+    for line in existing.lines() {
+        let Some(account_id) = line.strip_suffix(&user_suffix) else {
+            continue;
+        };
+        if account_id.is_empty() || account_id.contains('\\') {
+            continue;
+        }
+
+        let expected_url = format!("{account_id}\\url={server}");
+        if existing.lines().any(|candidate| candidate == expected_url) {
+            return Some(account_id.to_string());
+        }
+    }
+    None
 }
 
 // nextcloud-client en KDE usa KWallet directamente vía D-Bus (QtKeychain),
 // no la Secret Service API. Escribimos en KWallet con la misma clave que
-// busca nextcloud: "loginName:serverUrl" en la carpeta "Nextcloud".
-fn store_in_kwallet(username: &str, server: &str, password: &str) -> Result<(), String> {
-    let server = server.trim_end_matches('/');
+// busca nextcloud: "loginName:serverUrl/:accountId" en la carpeta "Nextcloud".
+fn store_in_kwallet(
+    username: &str,
+    server: &str,
+    account_id: &str,
+    password: &str,
+) -> Result<(), String> {
+    let server = format!("{}/", server.trim_end_matches('/'));
     let conn = Connection::new_session()
         .map_err(|e| format!("Error abriendo sesión D-Bus: {e}"))?;
 
@@ -332,7 +362,7 @@ fn store_in_kwallet(username: &str, server: &str, password: &str) -> Result<(), 
         return Err("KWallet rechazó la apertura del monedero".into());
     }
 
-    let key = format!("{username}:{server}");
+    let key = format!("{username}:{server}:{account_id}");
     let _: (i32,) = proxy
         .method_call(
             "org.kde.KWallet",
