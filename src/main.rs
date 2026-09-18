@@ -468,15 +468,42 @@ fn store_in_kwallet(
 
 // ---------- Marcador en Dolphin ----------
 
+fn percent_encode_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for &byte in path.as_bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'/'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~' => encoded.push(byte as char),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
     let places_path = dirs::data_local_dir()
         .ok_or("No se puede obtener el directorio de datos locales")?
         .join("user-places.xbel");
 
     let path_str = sync_dir.to_string_lossy();
-    let encoded = path_str.replace(' ', "%20");
-    let href = format!("file://{encoded}");
-    let title = format!("Cloud - {username}");
+    let href = format!("file://{}", percent_encode_path(&path_str));
+    let href_xml = xml_escape(&href);
+    let title = xml_escape(&format!("Cloud - {username}"));
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -484,7 +511,7 @@ fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
         .as_secs();
 
     let entry = format!(
-        " <bookmark href=\"{href}\">\n  \
+        " <bookmark href=\"{href_xml}\">\n  \
            <title>{title}</title>\n  \
            <info>\n   \
              <metadata owner=\"http://freedesktop.org\">\n    \
@@ -501,7 +528,7 @@ fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
     let content = if places_path.exists() {
         let existing = std::fs::read_to_string(&places_path)
             .map_err(|e| format!("Error leyendo user-places.xbel: {e}"))?;
-        if existing.contains(&format!("href=\"{href}\"")) {
+        if existing.contains(&format!("href=\"{href_xml}\"")) {
             return Ok(());
         }
         existing.replace("</xbel>", &format!("{entry}</xbel>"))
@@ -562,5 +589,14 @@ mod tests {
     fn parses_effective_uid_from_proc_status() {
         let status = "Name:\ttest\nUid:\t1000\t1001\t1002\t1003\n";
         assert_eq!(effective_uid(status), Some(1001));
+    }
+
+    #[test]
+    fn encodes_dolphin_paths_and_xml() {
+        assert_eq!(
+            percent_encode_path("/home/alumno/Cloud - josé"),
+            "/home/alumno/Cloud%20-%20jos%C3%A9"
+        );
+        assert_eq!(xml_escape("A&B <test>"), "A&amp;B &lt;test&gt;");
     }
 }
