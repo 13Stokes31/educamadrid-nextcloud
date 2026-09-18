@@ -366,13 +366,19 @@ fn store_in_kwallet(
             return Err("KWallet rechazó la apertura del monedero".into());
         }
 
-        let _: (i32,) = proxy
+        let (write_result,): (i32,) = proxy
             .method_call(
                 "org.kde.KWallet",
                 "writePassword",
                 (handle, "Nextcloud", key.as_str(), password, "nextcloud-educamadrid"),
             )
             .map_err(|e| format!("KWallet writePassword: {e}"))?;
+
+        if write_result != 0 {
+            return Err(format!(
+                "KWallet no pudo guardar la contraseña (código {write_result})"
+            ));
+        }
 
         return Ok(());
     }
