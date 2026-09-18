@@ -1,0 +1,38 @@
+name: Build EndeavourOS binary
+
+on:
+  push:
+    branches:
+      - fix/nextcloud-34-compat
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            base-devel rust cargo pkgconf dbus \
+            libx11 libxcursor libxrandr libxi mesa wayland libxkbcommon git
+
+      - uses: actions/checkout@v4
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Strip binary
+        run: strip target/release/nextcloud-educamadrid
+
+      - name: Show binary info
+        run: |
+          file target/release/nextcloud-educamadrid
+          ldd target/release/nextcloud-educamadrid || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nextcloud-educamadrid-linux-x86_64
+          path: target/release/nextcloud-educamadrid
+          if-no-files-found: error
