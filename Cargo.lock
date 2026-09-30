@@ -1166,7 +1166,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nextcloud-educamadrid"
+name = "educamadrid-nextcloud"
 version = "0.3.0"
 dependencies = [
  "dbus",

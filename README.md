@@ -1,4 +1,4 @@
-# Nube Educamadrid (`nextcloud-educamadrid`)
+# Nube Educamadrid (`educamadrid-nextcloud`)
 
 Pequeña GUI que automatiza el alta de la cuenta Nextcloud corporativa de Educamadrid
 (`https://cloud.educa.madrid.org/`) en el cliente de escritorio, sin tener que rellenar
@@ -29,7 +29,7 @@ a mano el asistente de Nextcloud ni buscar dónde guarda la contraseña.
 cargo build --release
 ```
 
-Salida: `target/release/nextcloud-educamadrid`.
+Salida: `target/release/educamadrid-nextcloud`.
 
 ## Requisitos del sistema
 
@@ -42,7 +42,7 @@ Salida: `target/release/nextcloud-educamadrid`.
 ## Uso
 
 ```bash
-./target/release/nextcloud-educamadrid
+./target/release/educamadrid-nextcloud
 ```
 
 Pulsas **Conectar**, inicias sesión en el navegador con tu cuenta `@educa.madrid.org` y

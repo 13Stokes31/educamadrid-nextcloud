@@ -1,10 +1,10 @@
 [package]
-name = "nextcloud-educamadrid"
+name = "educamadrid-nextcloud"
 version = "0.3.0"
 edition = "2021"
 
 [[bin]]
-name = "nextcloud-educamadrid"
+name = "educamadrid-nextcloud"
 path = "src/main.rs"
 
 [dependencies]

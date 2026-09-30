@@ -324,7 +324,7 @@ fn store_in_kwallet(username: &str, server: &str, password: &str) -> Result<(), 
         .method_call(
             "org.kde.KWallet",
             "open",
-            ("kdewallet", 0i64, "nextcloud-educamadrid"),
+            ("kdewallet", 0i64, "educamadrid-nextcloud"),
         )
         .map_err(|e| format!("KWallet open: {e}"))?;
 
@@ -337,7 +337,7 @@ fn store_in_kwallet(username: &str, server: &str, password: &str) -> Result<(), 
         .method_call(
             "org.kde.KWallet",
             "writePassword",
-            (handle, "Nextcloud", key.as_str(), password, "nextcloud-educamadrid"),
+            (handle, "Nextcloud", key.as_str(), password, "educamadrid-nextcloud"),
         )
         .map_err(|e| format!("KWallet writePassword: {e}"))?;
 
