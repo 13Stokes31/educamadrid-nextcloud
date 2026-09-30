@@ -14,7 +14,7 @@ depends=('dbus' 'nextcloud-client' 'kwallet' 'xdg-utils' 'gcc-libs' 'glibc' 'lib
 provides=("$_pkgname=$pkgver")
 conflicts=("$_pkgname")
 source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/$_pkgname-v$pkgver-x86_64-linux-gnu.tar.gz")
-sha256sums=('SKIP') # se rellena al publicar la release
+sha256sums=('0d97266818ef6962c39bdd3603ca1cc3fa364cd3c61835b7823beeddd2964009')
 
 package() {
     cd "$_pkgname-$pkgver-x86_64-linux-gnu"

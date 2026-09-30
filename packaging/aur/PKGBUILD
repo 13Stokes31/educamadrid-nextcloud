@@ -10,8 +10,10 @@ license=('MIT')
 depends=('dbus' 'nextcloud-client' 'kwallet' 'xdg-utils' 'gcc-libs' 'glibc' 'libglvnd' 'libx11' 'libxcursor' 'libxi'
          'libxkbcommon' 'libxkbcommon-x11' 'libxrender' 'wayland')
 makedepends=('cargo')
+# ring compila C: con el LTO de makepkg sus objetos no enlazan con rust-lld.
+options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP') # se rellena al publicar la release
+sha256sums=('6a5f8b2b84511a9a43cf4bd48a22a4a88550f68c70b1ef46a0619474c2db9281')
 
 prepare() {
     cd "educamadrid-nextcloud-$pkgver"
