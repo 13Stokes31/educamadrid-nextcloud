@@ -2,6 +2,10 @@
 name = "educamadrid-nextcloud"
 version = "0.3.0"
 edition = "2021"
+rust-version = "1.88"
+description = "GUI para dar de alta la cuenta Nextcloud de EducaMadrid en el cliente de escritorio (KDE Plasma)"
+license = "MIT"
+repository = "https://github.com/13Stokes31/educamadrid-nextcloud"
 
 [[bin]]
 name = "educamadrid-nextcloud"

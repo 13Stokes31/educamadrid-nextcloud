@@ -3,14 +3,22 @@ use eframe::egui::{self, Color32, RichText};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 const SERVER_URL: &str = "https://cloud.educa.madrid.org/";
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const POLL_TIMEOUT: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+// Errores de red seguidos tolerados en el sondeo antes de abortar.
+const MAX_TRANSPORT_ERRORS: u32 = 5;
+const CLIENT_COMM: &str = "nextcloud";
+const QUIT_TIMEOUT: Duration = Duration::from_secs(15);
+const KILL_TIMEOUT: Duration = Duration::from_secs(5);
+const CLOSE_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 // QtKeychain usa Theme::appName() como carpeta e identificador de aplicación.
 // En el cliente oficial sin personalizar ambos valores son "Nextcloud".
 const NEXTCLOUD_KEYCHAIN_SERVICE: &str = "Nextcloud";
@@ -50,6 +58,7 @@ enum State {
 struct App {
     state: State,
     rx: Option<mpsc::Receiver<Result<String, String>>>,
+    cancel: Arc<AtomicBool>,
     close_at: Option<Instant>,
 }
 
@@ -58,6 +67,7 @@ impl Default for App {
         Self {
             state: State::Ready,
             rx: None,
+            cancel: Arc::new(AtomicBool::new(false)),
             close_at: None,
         }
     }
@@ -107,11 +117,22 @@ impl eframe::App for App {
                             .clicked()
                         {
                             let (tx, rx) = mpsc::channel();
+                            let cancel = Arc::new(AtomicBool::new(false));
                             self.rx = Some(rx);
+                            self.cancel = cancel.clone();
                             self.state = State::Waiting;
                             std::thread::spawn(move || {
-                                let result = run_login_flow().and_then(|login| {
+                                let result = run_login_flow(&cancel).and_then(|login| {
+                                    // Si se canceló mientras terminaba el login, no se toca nada.
+                                    if cancel.load(Ordering::Relaxed) {
+                                        return Err("Cancelado".into());
+                                    }
                                     let username = login.login_name.clone();
+                                    close_nextcloud_client()?;
+                                    // Cerrar el cliente puede tardar; se vuelve a mirar antes de escribir.
+                                    if cancel.load(Ordering::Relaxed) {
+                                        return Err("Cancelado".into());
+                                    }
                                     setup_account(login)?;
                                     Ok(username)
                                 });
@@ -123,6 +144,12 @@ impl eframe::App for App {
                         ui.spinner();
                         ui.add_space(8.0);
                         ui.label("Esperando confirmación y configurando…");
+                        ui.add_space(10.0);
+                        if ui.button("Cancelar").clicked() {
+                            self.cancel.store(true, Ordering::Relaxed);
+                            self.rx = None;
+                            self.state = State::Ready;
+                        }
                     }
                     State::Done(username) => {
                         ui.colored_label(
@@ -156,6 +183,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Nube Educamadrid")
+            .with_app_id("educamadrid-nextcloud")
             .with_inner_size([380.0, 230.0])
             .with_resizable(false),
         ..Default::default()
@@ -169,7 +197,7 @@ fn main() -> eframe::Result<()> {
 
 // ---------- Login Flow v2 ----------
 
-fn run_login_flow() -> Result<LoginResult, String> {
+fn run_login_flow(cancel: &AtomicBool) -> Result<LoginResult, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(REQUEST_TIMEOUT)
         .timeout_read(REQUEST_TIMEOUT)
@@ -193,7 +221,11 @@ fn run_login_flow() -> Result<LoginResult, String> {
         .map_err(|e| format!("No se pudo abrir el navegador: {e}"))?;
 
     let start = Instant::now();
+    let mut transport_errors = 0;
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Cancelado".into());
+        }
         if start.elapsed() > POLL_TIMEOUT {
             return Err("Tiempo de espera agotado (5 minutos)".into());
         }
@@ -209,9 +241,35 @@ fn run_login_flow() -> Result<LoginResult, String> {
                 validate_login_result(&result)?;
                 return Ok(result);
             }
-            Err(ureq::Error::Status(404, _)) => continue,
-            Err(e) => return Err(format!("Error de sondeo: {e}")),
+            Err(e) => match classify_poll_error(&e) {
+                PollError::Pending => transport_errors = 0,
+                PollError::Transport => {
+                    transport_errors += 1;
+                    if transport_errors >= MAX_TRANSPORT_ERRORS {
+                        return Err(format!(
+                            "Sin conexión con el servidor ({MAX_TRANSPORT_ERRORS} errores de red seguidos): {e}"
+                        ));
+                    }
+                }
+                PollError::Fatal => return Err(format!("Error de sondeo: {e}")),
+            },
         }
+    }
+}
+
+enum PollError {
+    /// 404: el usuario aún no ha confirmado en el navegador.
+    Pending,
+    /// Fallo de red puntual: se reintenta.
+    Transport,
+    Fatal,
+}
+
+fn classify_poll_error(error: &ureq::Error) -> PollError {
+    match error {
+        ureq::Error::Status(404, _) => PollError::Pending,
+        ureq::Error::Transport(_) => PollError::Transport,
+        ureq::Error::Status(..) => PollError::Fatal,
     }
 }
 
@@ -258,6 +316,73 @@ fn validate_username(username: &str) -> Result<(), String> {
 
 fn normalize_server(server: &str) -> &str {
     server.trim_end_matches('/')
+}
+
+// ---------- Cierre del cliente Nextcloud ----------
+
+// `comm` termina en salto de línea al leerlo de /proc.
+fn is_nextcloud_client(comm: &str) -> bool {
+    comm.trim_end() == CLIENT_COMM
+}
+
+/// PIDs de procesos `nextcloud` del usuario actual.
+fn running_client_pids() -> Vec<u32> {
+    let Ok(own_uid) = std::fs::metadata("/proc/self").map(|m| m.uid()) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+            let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+            let uid = entry.metadata().ok()?.uid();
+            (is_nextcloud_client(&comm) && uid == own_uid).then_some(pid)
+        })
+        .collect()
+}
+
+/// Espera a que `done` sea cierto, comprobándolo cada `interval`. Devuelve si lo logró.
+fn wait_until(timeout: Duration, interval: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let start = Instant::now();
+    loop {
+        if done() {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+// Cierra el cliente antes de tocar su configuración: si sigue abierto, al salir
+// reescribiría nextcloud.cfg y pisaría la cuenta recién añadida.
+fn close_nextcloud_client() -> Result<(), String> {
+    let pids = running_client_pids();
+    if pids.is_empty() {
+        return Ok(());
+    }
+    let all_gone = || !running_client_pids().iter().any(|pid| pids.contains(pid));
+
+    let _ = std::process::Command::new(CLIENT_COMM)
+        .arg("--quit")
+        .status();
+    if wait_until(QUIT_TIMEOUT, CLOSE_CHECK_INTERVAL, all_gone) {
+        return Ok(());
+    }
+
+    for pid in &pids {
+        let _ = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .status();
+    }
+    if wait_until(KILL_TIMEOUT, CLOSE_CHECK_INTERVAL, all_gone) {
+        return Ok(());
+    }
+    Err("No se pudo cerrar el cliente Nextcloud; ciérralo y pulsa Reintentar".into())
 }
 
 // ---------- Configuración de cuenta ----------
@@ -717,6 +842,39 @@ mod tests {
             path_to_file_url(Path::new("/home/a/Cloud - a+b@example.org")),
             "file:///home/a/Cloud%20-%20a%2Bb%40example.org"
         );
+    }
+
+    #[test]
+    fn detects_nextcloud_client_by_comm() {
+        assert!(is_nextcloud_client("nextcloud\n"));
+        assert!(is_nextcloud_client("nextcloud"));
+        assert!(!is_nextcloud_client("nextcloud-desktop\n"));
+        assert!(!is_nextcloud_client("educamadrid-nextcloud\n"));
+        assert!(!is_nextcloud_client("Nextcloud\n"));
+    }
+
+    #[test]
+    fn classifies_poll_errors() {
+        let pending = ureq::Error::Status(404, ureq::Response::new(404, "Not Found", "").unwrap());
+        let server = ureq::Error::Status(500, ureq::Response::new(500, "Oops", "").unwrap());
+        let network = ureq::Error::from(std::io::Error::other("sin red"));
+        assert!(matches!(classify_poll_error(&pending), PollError::Pending));
+        assert!(matches!(classify_poll_error(&server), PollError::Fatal));
+        assert!(matches!(
+            classify_poll_error(&network),
+            PollError::Transport
+        ));
+    }
+
+    #[test]
+    fn wait_until_respects_condition_and_timeout() {
+        let tick = Duration::from_millis(1);
+        let mut calls = 0;
+        assert!(wait_until(Duration::from_secs(1), tick, || {
+            calls += 1;
+            calls == 3
+        }));
+        assert!(!wait_until(Duration::from_millis(10), tick, || false));
     }
 
     #[test]

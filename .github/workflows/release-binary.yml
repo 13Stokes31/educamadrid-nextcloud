@@ -1,0 +1,151 @@
+name: Build release binary
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build (for example v0.2.1)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64:
+    name: Linux x86_64
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Resolve release tag
+        id: ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            tag="${{ github.event.release.tag_name }}"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Check out tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.ref.outputs.tag }}
+          persist-credentials: false
+
+      - name: Validate version and asset name
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ref.outputs.tag }}"
+          cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          if [[ -z "$cargo_version" ]]; then
+            echo "Could not read package version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [[ "$tag" != "v${cargo_version}" ]]; then
+            echo "Release tag $tag does not match Cargo.toml version $cargo_version" >&2
+            exit 1
+          fi
+          echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "asset=educamadrid-nextcloud-v${cargo_version}-x86_64-linux-gnu.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Install native build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libdbus-1-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxrender-dev
+
+      - name: Install Rust 1.88
+        shell: bash
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+          rustc --version
+          cargo --version
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+      - name: Inspect dynamic dependencies
+        run: ldd target/release/educamadrid-nextcloud
+
+      - name: Create release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.meta.outputs.version }}"
+          asset="${{ steps.meta.outputs.asset }}"
+          bundle="educamadrid-nextcloud-${version}-x86_64-linux-gnu"
+
+          strip --strip-unneeded target/release/educamadrid-nextcloud
+          mkdir -p "dist/$bundle"
+          install -Dm755 target/release/educamadrid-nextcloud "dist/$bundle/educamadrid-nextcloud"
+          install -Dm644 educamadrid-nextcloud.desktop "dist/$bundle/educamadrid-nextcloud.desktop"
+          install -Dm644 LICENSE "dist/$bundle/LICENSE"
+
+          tar \
+            --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C dist \
+            -czf "dist/$asset" \
+            "$bundle"
+
+          (cd dist && sha256sum "$asset" > "$asset.sha256")
+          cat "dist/$asset.sha256"
+
+      - name: Upload assets to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.tag }}"
+          asset="${{ steps.meta.outputs.asset }}"
+          gh release view "$tag" >/dev/null
+
+          upload_if_unchanged() {
+            local file="$1"
+            local name="${file##*/}"
+            local expected
+            local current
+            expected="sha256:$(sha256sum "$file" | cut -d' ' -f1)"
+            current="$(
+              gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+                --jq ".assets[] | select(.name == \"$name\") | .digest"
+            )"
+
+            if [[ -z "$current" ]]; then
+              gh release upload "$tag" "$file"
+            elif [[ "$current" == "$expected" ]]; then
+              echo "$name ya existe con el mismo SHA-256; no se sustituye."
+            else
+              echo "$name ya existe con contenido diferente; publica una versión nueva." >&2
+              exit 1
+            fi
+          }
+
+          upload_if_unchanged "dist/$asset"
+          upload_if_unchanged "dist/$asset.sha256"

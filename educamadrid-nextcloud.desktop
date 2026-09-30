@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Nube Educamadrid
+GenericName=Cuenta Nextcloud de EducaMadrid
+Comment=Da de alta la cuenta Nextcloud de EducaMadrid en el cliente de escritorio
+Exec=educamadrid-nextcloud
+Icon=folder-cloud
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=nextcloud;nube;cloud;educamadrid;
+StartupWMClass=educamadrid-nextcloud
