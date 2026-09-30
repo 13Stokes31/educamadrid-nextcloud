@@ -1,13 +1,19 @@
 use dbus::blocking::Connection;
 use eframe::egui::{self, Color32, RichText};
 use serde::Deserialize;
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const SERVER_URL: &str = "https://cloud.educa.madrid.org/";
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const POLL_TIMEOUT: Duration = Duration::from_secs(300);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+// QtKeychain usa Theme::appName() como carpeta e identificador de aplicación.
+// En el cliente oficial sin personalizar ambos valores son "Nextcloud".
+const NEXTCLOUD_KEYCHAIN_SERVICE: &str = "Nextcloud";
 
 // ---------- Nextcloud Login Flow v2 ----------
 
@@ -43,13 +49,17 @@ enum State {
 
 struct App {
     state: State,
-    rx: Option<mpsc::Receiver<Result<LoginResult, String>>>,
+    rx: Option<mpsc::Receiver<Result<String, String>>>,
     close_at: Option<Instant>,
 }
 
 impl Default for App {
     fn default() -> Self {
-        Self { state: State::Ready, rx: None, close_at: None }
+        Self {
+            state: State::Ready,
+            rx: None,
+            close_at: None,
+        }
     }
 }
 
@@ -58,16 +68,9 @@ impl eframe::App for App {
         if let State::Waiting = &self.state {
             if let Some(rx) = &self.rx {
                 match rx.try_recv() {
-                    Ok(Ok(result)) => {
-                        let username = result.login_name.clone();
-                        match setup_account(result) {
-                            Ok(_) => {
-                                self.state = State::Done(username);
-                                self.close_at =
-                                    Some(Instant::now() + Duration::from_secs(3));
-                            }
-                            Err(e) => self.state = State::Error(e),
-                        }
+                    Ok(Ok(username)) => {
+                        self.state = State::Done(username);
+                        self.close_at = Some(Instant::now() + Duration::from_secs(3));
                         self.rx = None;
                     }
                     Ok(Err(e)) => {
@@ -107,14 +110,19 @@ impl eframe::App for App {
                             self.rx = Some(rx);
                             self.state = State::Waiting;
                             std::thread::spawn(move || {
-                                let _ = tx.send(run_login_flow());
+                                let result = run_login_flow().and_then(|login| {
+                                    let username = login.login_name.clone();
+                                    setup_account(login)?;
+                                    Ok(username)
+                                });
+                                let _ = tx.send(result);
                             });
                         }
                     }
                     State::Waiting => {
                         ui.spinner();
                         ui.add_space(8.0);
-                        ui.label("Esperando confirmación en el navegador…");
+                        ui.label("Esperando confirmación y configurando…");
                     }
                     State::Done(username) => {
                         ui.colored_label(
@@ -162,13 +170,22 @@ fn main() -> eframe::Result<()> {
 // ---------- Login Flow v2 ----------
 
 fn run_login_flow() -> Result<LoginResult, String> {
-    let response = ureq::post(&format!("{SERVER_URL}index.php/login/v2"))
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(REQUEST_TIMEOUT)
+        .timeout_read(REQUEST_TIMEOUT)
+        .timeout_write(REQUEST_TIMEOUT)
+        .build();
+
+    let response = agent
+        .post(&format!("{SERVER_URL}index.php/login/v2"))
         .call()
         .map_err(|e| format!("Error conectando con el servidor: {e}"))?;
 
     let flow: FlowResponse = response
         .into_json()
         .map_err(|e| format!("Respuesta inválida del servidor: {e}"))?;
+
+    validate_flow_response(&flow)?;
 
     std::process::Command::new("xdg-open")
         .arg(&flow.login)
@@ -181,18 +198,66 @@ fn run_login_flow() -> Result<LoginResult, String> {
             return Err("Tiempo de espera agotado (5 minutos)".into());
         }
         std::thread::sleep(POLL_INTERVAL);
-        match ureq::post(&flow.poll.endpoint)
+        match agent
+            .post(&flow.poll.endpoint)
             .send_form(&[("token", flow.poll.token.as_str())])
         {
             Ok(resp) => {
-                return resp
+                let result: LoginResult = resp
                     .into_json()
-                    .map_err(|e| format!("Error leyendo credenciales: {e}"));
+                    .map_err(|e| format!("Error leyendo credenciales: {e}"))?;
+                validate_login_result(&result)?;
+                return Ok(result);
             }
             Err(ureq::Error::Status(404, _)) => continue,
             Err(e) => return Err(format!("Error de sondeo: {e}")),
         }
     }
+}
+
+fn validate_flow_response(flow: &FlowResponse) -> Result<(), String> {
+    if flow.poll.token.is_empty() {
+        return Err("El servidor devolvió un token de acceso vacío".into());
+    }
+    validate_server_url(&flow.login, "URL de acceso")?;
+    validate_server_url(&flow.poll.endpoint, "URL de sondeo")
+}
+
+fn validate_login_result(result: &LoginResult) -> Result<(), String> {
+    validate_username(&result.login_name)?;
+    if normalize_server(&result.server) != normalize_server(SERVER_URL) {
+        return Err("El servidor devolvió una URL de cuenta inesperada".into());
+    }
+    if result.app_password.is_empty() {
+        return Err("El servidor devolvió una contraseña de aplicación vacía".into());
+    }
+    Ok(())
+}
+
+fn validate_server_url(url: &str, description: &str) -> Result<(), String> {
+    if url.starts_with(SERVER_URL) && !url.chars().any(char::is_control) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{description} inesperada: debe pertenecer a Educamadrid"
+        ))
+    }
+}
+
+fn validate_username(username: &str) -> Result<(), String> {
+    if username.is_empty()
+        || username.len() > 200
+        || username
+            .chars()
+            .any(|c| c.is_control() || c == '/' || c == '\\')
+    {
+        return Err("El servidor devolvió un nombre de usuario no válido".into());
+    }
+    Ok(())
+}
+
+fn normalize_server(server: &str) -> &str {
+    server.trim_end_matches('/')
 }
 
 // ---------- Configuración de cuenta ----------
@@ -204,8 +269,13 @@ fn setup_account(result: LoginResult) -> Result<(), String> {
     std::fs::create_dir_all(&sync_dir)
         .map_err(|e| format!("Error creando carpeta de sincronización: {e}"))?;
 
-    write_nextcloud_config(&result.login_name, &result.server, &sync_dir)?;
-    store_in_kwallet(&result.login_name, &result.server, &result.app_password)?;
+    let account_id = write_nextcloud_config(&result.login_name, &result.server, &sync_dir)?;
+    store_in_kwallet(
+        &result.login_name,
+        &result.server,
+        &account_id,
+        &result.app_password,
+    )?;
     add_dolphin_bookmark(&result.login_name, &sync_dir)?;
 
     std::process::Command::new("nextcloud")
@@ -215,11 +285,13 @@ fn setup_account(result: LoginResult) -> Result<(), String> {
     Ok(())
 }
 
-fn write_nextcloud_config(
-    username: &str,
-    server: &str,
-    sync_dir: &Path,
-) -> Result<(), String> {
+#[derive(Default)]
+struct AccountConfig {
+    username: Option<String>,
+    server: Option<String>,
+}
+
+fn write_nextcloud_config(username: &str, server: &str, sync_dir: &Path) -> Result<String, String> {
     let config_dir = dirs::config_dir()
         .ok_or("No se puede obtener el directorio de configuración")?
         .join("Nextcloud");
@@ -229,7 +301,7 @@ fn write_nextcloud_config(
 
     let config_path = config_dir.join("nextcloud.cfg");
     let sync_path = sync_dir.to_string_lossy();
-    let server = server.trim_end_matches('/');
+    let server = normalize_server(server);
 
     if !config_path.exists() {
         let content = format!(
@@ -250,22 +322,24 @@ fn write_nextcloud_config(
              0\\Folders\\1\\virtualFilesMode=off\n\
              version=13\n"
         );
-        return std::fs::write(&config_path, content)
-            .map_err(|e| format!("Error escribiendo configuración: {e}"));
+        atomic_write(&config_path, content.as_bytes())
+            .map_err(|e| format!("Error escribiendo configuración: {e}"))?;
+        return Ok("0".into());
     }
 
     let existing = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("Error leyendo configuración existente: {e}"))?;
 
-    if existing.contains(&format!("\\dav_user={username}"))
-        && existing.contains(&format!("\\url={server}"))
-    {
-        return Ok(());
+    let accounts = parse_accounts(&existing);
+    if let Some((account_id, _)) = accounts.iter().find(|(_, account)| {
+        account.username.as_deref() == Some(username)
+            && account.server.as_deref().map(normalize_server) == Some(server)
+    }) {
+        return Ok(account_id.to_string());
     }
 
-    // Siguiente índice libre: buscar cuántos {n}\ hay en [Accounts]
     let mut idx = 0;
-    while existing.contains(&format!("\n{idx}\\")) {
+    while accounts.contains_key(&idx) {
         idx += 1;
     }
 
@@ -283,48 +357,139 @@ fn write_nextcloud_config(
          {idx}\\Folders\\1\\virtualFilesMode=off\n"
     );
 
-    // Insertar antes del marcador "version=13" de sección (sin prefijo numérico)
-    let updated = if let Some(pos) = existing.rfind("\nversion=13") {
-        format!("{}\n{}{}", &existing[..pos], new_lines, &existing[pos + 1..])
-    } else {
-        format!("{existing}{new_lines}")
-    };
+    let updated = insert_account_lines(&existing, &new_lines);
 
-    std::fs::write(&config_path, updated)
+    atomic_write(&config_path, updated.as_bytes())
         .map_err(|e| format!("Error actualizando configuración: {e}"))?;
-    Ok(())
+    Ok(idx.to_string())
 }
 
-// nextcloud-client en KDE usa KWallet directamente vía D-Bus (QtKeychain),
-// no la Secret Service API. Escribimos en KWallet con la misma clave que
-// busca nextcloud: "loginName:serverUrl" en la carpeta "Nextcloud".
-fn store_in_kwallet(username: &str, server: &str, password: &str) -> Result<(), String> {
-    let server = server.trim_end_matches('/');
-    let conn = Connection::new_session()
-        .map_err(|e| format!("Error abriendo sesión D-Bus: {e}"))?;
+fn parse_accounts(content: &str) -> BTreeMap<usize, AccountConfig> {
+    let mut accounts: BTreeMap<usize, AccountConfig> = BTreeMap::new();
+    let mut in_accounts = false;
 
-    let dbus_proxy = conn.with_proxy(
-        "org.freedesktop.DBus",
-        "/org/freedesktop/DBus",
-        Duration::from_secs(3),
-    );
-    let (names,): (Vec<String>,) = dbus_proxy
-        .method_call("org.freedesktop.DBus", "ListNames", ())
-        .unwrap_or_default();
+    for line in content.lines() {
+        let trimmed = line.trim().trim_end_matches('\r');
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_accounts = trimmed == "[Accounts]";
+            continue;
+        }
+        if !in_accounts {
+            continue;
+        }
 
-    let (service, obj) = if names.iter().any(|n| n == "org.kde.kwalletd6") {
-        ("org.kde.kwalletd6", "/modules/kwalletd6")
-    } else {
-        ("org.kde.kwalletd5", "/modules/kwalletd5")
-    };
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let Some((account_id, field)) = key.split_once('\\') else {
+            continue;
+        };
+        let Ok(account_id) = account_id.parse::<usize>() else {
+            continue;
+        };
 
-    let proxy = conn.with_proxy(service, obj, Duration::from_secs(10));
+        let account = accounts.entry(account_id).or_default();
+        match field {
+            "dav_user" => account.username = Some(value.to_owned()),
+            "url" => account.server = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+
+    accounts
+}
+
+fn insert_account_lines(existing: &str, new_lines: &str) -> String {
+    let mut output = String::with_capacity(existing.len() + new_lines.len() + 32);
+    let mut in_accounts = false;
+    let mut found_accounts = false;
+    let mut inserted = false;
+
+    for line in existing.split_inclusive('\n') {
+        let trimmed = line.trim().trim_end_matches('\r');
+        let is_section = trimmed.starts_with('[') && trimmed.ends_with(']');
+
+        if in_accounts
+            && !inserted
+            && (is_section || (trimmed.starts_with("version=") && !trimmed.contains('\\')))
+        {
+            ensure_trailing_newline(&mut output);
+            output.push_str(new_lines);
+            inserted = true;
+        }
+
+        if is_section {
+            in_accounts = trimmed == "[Accounts]";
+            found_accounts |= in_accounts;
+        }
+        output.push_str(line);
+    }
+
+    if found_accounts && !inserted {
+        ensure_trailing_newline(&mut output);
+        output.push_str(new_lines);
+    } else if !found_accounts {
+        ensure_trailing_newline(&mut output);
+        output.push_str("\n[Accounts]\n");
+        output.push_str(new_lines);
+        output.push_str("version=13\n");
+    }
+
+    output
+}
+
+fn ensure_trailing_newline(content: &mut String) {
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+}
+
+// Reproduce el backend KWallet de QtKeychain que usa Nextcloud: consulta el
+// monedero de red configurado y escribe la clave con URL e id de cuenta.
+fn store_in_kwallet(
+    username: &str,
+    server: &str,
+    account_id: &str,
+    password: &str,
+) -> Result<(), String> {
+    let conn =
+        Connection::new_session().map_err(|e| format!("Error abriendo sesión D-Bus: {e}"))?;
+
+    let candidates = [
+        ("org.kde.kwalletd6", "/modules/kwalletd6"),
+        ("org.kde.kwalletd5", "/modules/kwalletd5"),
+        ("org.kde.kwalletd", "/modules/kwalletd"),
+    ];
+    let mut selected = None;
+    let mut last_error = None;
+
+    for (service, object) in candidates {
+        let proxy = conn.with_proxy(service, object, Duration::from_secs(3));
+        let reply: Result<(String,), _> = proxy.method_call("org.kde.KWallet", "networkWallet", ());
+        match reply {
+            Ok((wallet,)) if !wallet.is_empty() => {
+                selected = Some((service, object, wallet));
+                break;
+            }
+            Ok(_) => last_error = Some("KWallet devolvió un monedero de red vacío".into()),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+
+    let (service, object, wallet) = selected.ok_or_else(|| {
+        format!(
+            "No se encontró un servicio KWallet utilizable: {}",
+            last_error.unwrap_or_else(|| "error desconocido".into())
+        )
+    })?;
+
+    let proxy = conn.with_proxy(service, object, Duration::from_secs(10));
 
     let (handle,): (i32,) = proxy
         .method_call(
             "org.kde.KWallet",
             "open",
-            ("kdewallet", 0i64, "educamadrid-nextcloud"),
+            (wallet.as_str(), 0i64, NEXTCLOUD_KEYCHAIN_SERVICE),
         )
         .map_err(|e| format!("KWallet open: {e}"))?;
 
@@ -332,16 +497,34 @@ fn store_in_kwallet(username: &str, server: &str, password: &str) -> Result<(), 
         return Err("KWallet rechazó la apertura del monedero".into());
     }
 
-    let key = format!("{username}:{server}");
-    let _: (i32,) = proxy
-        .method_call(
-            "org.kde.KWallet",
-            "writePassword",
-            (handle, "Nextcloud", key.as_str(), password, "educamadrid-nextcloud"),
-        )
-        .map_err(|e| format!("KWallet writePassword: {e}"))?;
+    let key = nextcloud_keychain_key(username, server, account_id);
+    let write_result: Result<(i32,), dbus::Error> = proxy.method_call(
+        "org.kde.KWallet",
+        "writePassword",
+        (
+            handle,
+            NEXTCLOUD_KEYCHAIN_SERVICE,
+            key.as_str(),
+            password,
+            NEXTCLOUD_KEYCHAIN_SERVICE,
+        ),
+    );
+
+    let (status,) = write_result.map_err(|e| format!("KWallet writePassword: {e}"))?;
+    if status != 0 {
+        return Err(format!(
+            "KWallet no pudo guardar la contraseña (código {status})"
+        ));
+    }
+
+    // QtKeychain conserva el handle y deja que KWallet gestione su ciclo de vida.
+    // Cerrar aquí falla si el monedero sigue en uso por otra aplicación.
 
     Ok(())
+}
+
+fn nextcloud_keychain_key(username: &str, server: &str, account_id: &str) -> String {
+    format!("{username}:{}/:{account_id}", normalize_server(server))
 }
 
 // ---------- Marcador en Dolphin ----------
@@ -351,10 +534,14 @@ fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
         .ok_or("No se puede obtener el directorio de datos locales")?
         .join("user-places.xbel");
 
-    let path_str = sync_dir.to_string_lossy();
-    let encoded = path_str.replace(' ', "%20");
-    let href = format!("file://{encoded}");
-    let title = format!("Cloud - {username}");
+    if let Some(parent) = places_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Error creando directorio de marcadores: {e}"))?;
+    }
+
+    let href = path_to_file_url(sync_dir);
+    let href_xml = escape_xml(&href);
+    let title = escape_xml(&format!("Cloud - {username}"));
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -362,7 +549,7 @@ fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
         .as_secs();
 
     let entry = format!(
-        " <bookmark href=\"{href}\">\n  \
+        " <bookmark href=\"{href_xml}\">\n  \
            <title>{title}</title>\n  \
            <info>\n   \
              <metadata owner=\"http://freedesktop.org\">\n    \
@@ -379,10 +566,13 @@ fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
     let content = if places_path.exists() {
         let existing = std::fs::read_to_string(&places_path)
             .map_err(|e| format!("Error leyendo user-places.xbel: {e}"))?;
-        if existing.contains(&format!("href=\"{href}\"")) {
+        if existing.contains(&format!("href=\"{href_xml}\"")) {
             return Ok(());
         }
-        existing.replace("</xbel>", &format!("{entry}</xbel>"))
+        let Some(position) = existing.rfind("</xbel>") else {
+            return Err("user-places.xbel no contiene una etiqueta </xbel> válida".into());
+        };
+        format!("{}{entry}{}", &existing[..position], &existing[position..])
     } else {
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -394,7 +584,150 @@ fn add_dolphin_bookmark(username: &str, sync_dir: &Path) -> Result<(), String> {
         )
     };
 
-    std::fs::write(&places_path, content)
+    atomic_write(&places_path, content.as_bytes())
         .map_err(|e| format!("Error escribiendo user-places.xbel: {e}"))?;
     Ok(())
+}
+
+fn path_to_file_url(path: &Path) -> String {
+    let mut encoded = String::from("file://");
+    for byte in path.to_string_lossy().bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "la ruta no tiene directorio padre",
+        )
+    })?;
+    let original_permissions = std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    let temp_path = unique_temp_path(path);
+
+    let result = (|| {
+        let mut temp = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        if let Some(permissions) = original_permissions {
+            temp.set_permissions(permissions)?;
+        }
+        temp.write_all(content)?;
+        temp.sync_all()?;
+        std::fs::rename(&temp_path, path)?;
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn unique_temp_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    parent.join(format!(".{filename}.{}.{}.tmp", std::process::id(), nonce))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_accounts_without_combining_different_ids() {
+        let content = "[Accounts]\n0\\dav_user=ana\n0\\url=https://other.example\n\
+                       1\\dav_user=otro\n1\\url=https://cloud.educa.madrid.org\nversion=13\n";
+        let accounts = parse_accounts(content);
+
+        assert_eq!(accounts[&0].username.as_deref(), Some("ana"));
+        assert_eq!(
+            accounts[&0].server.as_deref(),
+            Some("https://other.example")
+        );
+        assert_eq!(accounts[&1].username.as_deref(), Some("otro"));
+        assert_eq!(
+            accounts[&1].server.as_deref(),
+            Some("https://cloud.educa.madrid.org")
+        );
+    }
+
+    #[test]
+    fn inserts_account_inside_accounts_section() {
+        let existing =
+            "[General]\nfoo=true\n\n[Accounts]\n0\\dav_user=ana\nversion=13\n\n[Other]\nx=1\n";
+        let updated = insert_account_lines(existing, "1\\dav_user=bea\n");
+
+        let account_position = updated.find("1\\dav_user=bea").unwrap();
+        let version_position = updated.find("version=13").unwrap();
+        let other_position = updated.find("[Other]").unwrap();
+        assert!(account_position < version_position);
+        assert!(version_position < other_position);
+    }
+
+    #[test]
+    fn creates_accounts_section_when_missing() {
+        let updated = insert_account_lines("[General]\nfoo=true\n", "0\\dav_user=ana\n");
+
+        assert!(updated.contains("[Accounts]\n0\\dav_user=ana\nversion=13\n"));
+    }
+
+    #[test]
+    fn builds_current_nextcloud_keychain_key() {
+        assert_eq!(
+            nextcloud_keychain_key(
+                "ana@educa.madrid.org",
+                "https://cloud.educa.madrid.org/",
+                "2"
+            ),
+            "ana@educa.madrid.org:https://cloud.educa.madrid.org/:2"
+        );
+    }
+
+    #[test]
+    fn escapes_bookmark_values() {
+        assert_eq!(escape_xml("a&<\"'"), "a&amp;&lt;&quot;&apos;");
+        assert_eq!(
+            path_to_file_url(Path::new("/home/a/Cloud - a+b@example.org")),
+            "file:///home/a/Cloud%20-%20a%2Bb%40example.org"
+        );
+    }
+
+    #[test]
+    fn rejects_unexpected_server_data() {
+        assert!(
+            validate_server_url("https://cloud.educa.madrid.org/index.php/login", "URL").is_ok()
+        );
+        assert!(
+            validate_server_url("https://cloud.educa.madrid.org.evil.example/login", "URL")
+                .is_err()
+        );
+        assert!(validate_username("../../escape").is_err());
+    }
 }

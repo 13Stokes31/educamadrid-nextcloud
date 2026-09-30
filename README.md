@@ -15,13 +15,17 @@ a mano el asistente de Nextcloud ni buscar dónde guarda la contraseña.
      usuario+servidor ya existían, no toca nada; si no, añade un índice nuevo sin
      afectar a las cuentas que ya tuvieras configuradas).
    - Guarda la contraseña de aplicación en **KWallet vía D-Bus** (detecta si el sistema
-     usa `kwalletd6` o `kwalletd5`), con la misma clave (`usuario:servidor`) que busca el
-     cliente Nextcloud.
+     usa `kwalletd6` o `kwalletd5`), dentro del monedero de red configurado y con la
+     misma clave que construye el cliente Nextcloud.
    - Añade un marcador "Cloud - `<usuario>`" en Dolphin (`user-places.xbel`).
    - Lanza el cliente `nextcloud`.
 
 > **Seguridad:** la contraseña de aplicación se pasa dentro de la llamada D-Bus a
 > KWallet, nunca como argumento de un proceso — no aparece en `ps` / `/proc/<pid>/cmdline`.
+> En el despliegue previsto, el monedero KWallet tiene una contraseña maestra vacía:
+> esto evita cualquier solicitud de desbloqueo, pero significa que la credencial no
+> tiene protección criptográfica efectiva en disco. Se mantienen los permisos del
+> archivo y los controles de acceso de KWallet durante la sesión.
 
 ## Compilar
 
@@ -34,7 +38,8 @@ Salida: `target/release/educamadrid-nextcloud`.
 ## Requisitos del sistema
 
 - Cliente **Nextcloud** instalado (binario `nextcloud` en el `PATH`).
-- **KWallet** (`kwalletd5` o `kwalletd6`) corriendo en el bus de sesión D-Bus.
+- **KWallet** (`kwalletd5` o `kwalletd6`) disponible en el bus de sesión D-Bus, con
+  un monedero de red configurado. Puede tener una contraseña maestra vacía.
 - **Dolphin** (o cualquier gestor de archivos KDE que lea `user-places.xbel`) si quieres
   que aparezca el marcador; si no existe el fichero, la app lo crea.
 - `xdg-open` para abrir el navegador del flujo de login.
@@ -56,7 +61,9 @@ devuelve el propio flujo de login de Nextcloud.
 ## Notas
 
 - Si ya tienes una cuenta de este mismo servidor configurada manualmente, comprueba que
-  el usuario y la URL coincidan exactamente con lo que ya hay en `nextcloud.cfg` antes de
-  usar la app — la detección de duplicados compara cadenas literales (`dav_user=` y
-  `url=`), así que una URL con barra final distinta o un usuario con mayúsculas distintas
-  crearía una cuenta nueva en vez de reconocer la existente.
+  el usuario coincida exactamente con lo que ya hay en `nextcloud.cfg`. La URL se
+  compara ignorando la barra final; las mayúsculas y minúsculas del usuario siguen
+  siendo significativas.
+- `nextcloud.cfg` es un formato interno del cliente. La aplicación conserva las cuentas
+  existentes y reemplaza el archivo atómicamente, pero debe probarse con cada versión de
+  Nextcloud Desktop que se vaya a desplegar.
