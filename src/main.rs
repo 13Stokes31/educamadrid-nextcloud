@@ -432,6 +432,9 @@ fn write_nextcloud_config(username: &str, server: &str, sync_dir: &Path) -> Resu
         let content = format!(
             "[General]\n\
              launchOnSystemStartup=true\n\
+             notifyExistingFoldersOverLimit=false\n\
+             stopSyncingExistingFoldersOverLimit=false\n\
+             useNewBigFolderSizeLimit=false\n\
              \n\
              [Accounts]\n\
              0\\authType=webflow\n\
@@ -455,11 +458,16 @@ fn write_nextcloud_config(username: &str, server: &str, sync_dir: &Path) -> Resu
     let existing = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("Error leyendo configuración existente: {e}"))?;
 
-    let accounts = parse_accounts(&existing);
+    let with_settings = apply_general_settings(&existing);
+    let accounts = parse_accounts(&with_settings);
     if let Some((account_id, _)) = accounts.iter().find(|(_, account)| {
         account.username.as_deref() == Some(username)
             && account.server.as_deref().map(normalize_server) == Some(server)
     }) {
+        if with_settings != existing {
+            atomic_write(&config_path, with_settings.as_bytes())
+                .map_err(|e| format!("Error actualizando configuración: {e}"))?;
+        }
         return Ok(account_id.to_string());
     }
 
@@ -482,11 +490,79 @@ fn write_nextcloud_config(username: &str, server: &str, sync_dir: &Path) -> Resu
          {idx}\\Folders\\1\\virtualFilesMode=off\n"
     );
 
-    let updated = insert_account_lines(&existing, &new_lines);
+    let updated = insert_account_lines(&with_settings, &new_lines);
 
     atomic_write(&config_path, updated.as_bytes())
         .map_err(|e| format!("Error actualizando configuración: {e}"))?;
     Ok(idx.to_string())
+}
+
+// Ajustes de [General] que se fuerzan siempre: sin ellos el cliente deja sin
+// sincronizar (a la espera de confirmación) las carpetas de más de 500 MB.
+const GENERAL_SETTINGS: [(&str, &str); 3] = [
+    ("notifyExistingFoldersOverLimit", "false"),
+    ("stopSyncingExistingFoldersOverLimit", "false"),
+    ("useNewBigFolderSizeLimit", "false"),
+];
+
+// Fija GENERAL_SETTINGS en [General]: corrige el valor si la clave existe, la
+// añade al final de la sección si falta y crea la sección si no hay.
+fn apply_general_settings(existing: &str) -> String {
+    let mut output = String::with_capacity(existing.len() + 128);
+    let mut in_general = false;
+    let mut found_general = false;
+    let mut seen = [false; GENERAL_SETTINGS.len()];
+
+    let push_missing = |output: &mut String, seen: &[bool]| {
+        for ((key, value), done) in GENERAL_SETTINGS.iter().zip(seen) {
+            if !done {
+                output.push_str(&format!("{key}={value}\n"));
+            }
+        }
+    };
+
+    for line in existing.split_inclusive('\n') {
+        let trimmed = line.trim().trim_end_matches('\r');
+        let is_section = trimmed.starts_with('[') && trimmed.ends_with(']');
+
+        if is_section {
+            if in_general {
+                // Las claves que falten van antes de la línea en blanco que separa secciones.
+                let blank_tail = output.ends_with("\n\n");
+                if blank_tail {
+                    output.pop();
+                }
+                push_missing(&mut output, &seen);
+                seen = [true; GENERAL_SETTINGS.len()];
+                if blank_tail {
+                    output.push('\n');
+                }
+            }
+            in_general = trimmed == "[General]";
+            found_general |= in_general;
+        } else if in_general {
+            let key = trimmed.split_once('=').map(|(key, _)| key);
+            if let Some(i) = GENERAL_SETTINGS.iter().position(|(k, _)| Some(*k) == key) {
+                let (k, v) = GENERAL_SETTINGS[i];
+                output.push_str(&format!("{k}={v}\n"));
+                seen[i] = true;
+                continue;
+            }
+        }
+        output.push_str(line);
+    }
+
+    if in_general {
+        ensure_trailing_newline(&mut output);
+        push_missing(&mut output, &seen);
+    } else if !found_general {
+        let mut header = String::from("[General]\n");
+        push_missing(&mut header, &[false; GENERAL_SETTINGS.len()]);
+        header.push('\n');
+        output.insert_str(0, &header);
+    }
+
+    output
 }
 
 fn parse_accounts(content: &str) -> BTreeMap<usize, AccountConfig> {
@@ -814,6 +890,27 @@ mod tests {
         let other_position = updated.find("[Other]").unwrap();
         assert!(account_position < version_position);
         assert!(version_position < other_position);
+    }
+
+    #[test]
+    fn forces_big_folder_settings_in_general() {
+        let existing = "[General]\nlaunchOnSystemStartup=true\nuseNewBigFolderSizeLimit=true\n\n\
+                        [Accounts]\n0\\dav_user=ana\nversion=13\n";
+        let updated = apply_general_settings(existing);
+        assert_eq!(
+            updated,
+            "[General]\nlaunchOnSystemStartup=true\nuseNewBigFolderSizeLimit=false\n\
+             notifyExistingFoldersOverLimit=false\nstopSyncingExistingFoldersOverLimit=false\n\n\
+             [Accounts]\n0\\dav_user=ana\nversion=13\n"
+        );
+        assert_eq!(apply_general_settings(&updated), updated);
+    }
+
+    #[test]
+    fn creates_general_section_when_missing() {
+        let updated = apply_general_settings("[Accounts]\nversion=13\n");
+        assert!(updated.starts_with("[General]\nnotifyExistingFoldersOverLimit=false\n"));
+        assert!(updated.ends_with("useNewBigFolderSizeLimit=false\n\n[Accounts]\nversion=13\n"));
     }
 
     #[test]

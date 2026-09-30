@@ -19,8 +19,13 @@ a mano el asistente de Nextcloud ni buscar dónde guarda la contraseña.
    da error sin haber tocado nada). Así el cliente no pisa la configuración al salir. Después:
    - Crea la carpeta de sincronización `~/Cloud - <usuario>`.
    - Escribe/actualiza `~/.config/Nextcloud/nextcloud.cfg` añadiendo la cuenta (si el
-     usuario+servidor ya existían, no toca nada; si no, añade un índice nuevo sin
-     afectar a las cuentas que ya tuvieras configuradas).
+     usuario+servidor ya existían, no la duplica; si no, añade un índice nuevo sin
+     afectar a las cuentas que ya tuvieras configuradas). Además desactiva siempre, en
+     `[General]`, la confirmación para carpetas de más de 500 MB
+     (`useNewBigFolderSizeLimit`, `notifyExistingFoldersOverLimit` y
+     `stopSyncingExistingFoldersOverLimit` a `false`), para que todo se sincronice solo.
+     Si una carpeta ya quedó apartada por ese límite antes, hay que marcarla a mano en el
+     cliente (la lista vive en la base de datos de la carpeta, no en `nextcloud.cfg`).
    - Guarda la contraseña de aplicación en **KWallet vía D-Bus** (detecta si el sistema
      usa `kwalletd6` o `kwalletd5`), dentro del monedero de red configurado y con la
      misma clave que construye el cliente Nextcloud.

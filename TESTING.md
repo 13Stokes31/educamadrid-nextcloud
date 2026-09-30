@@ -6,16 +6,19 @@ sin copia de `~/.config/Nextcloud/nextcloud.cfg`.
 
 ## Alta de la cuenta
 
-- [ ] **Usuario sin `nextcloud.cfg`:** mover `~/.config/Nextcloud` a un lado, abrir la app,
+- [x] **Usuario sin `nextcloud.cfg`:** mover `~/.config/Nextcloud` a un lado, abrir la app,
       pulsar Conectar, iniciar sesión en el navegador. Mensaje verde, se crea `~/Cloud - usuario`
       y se abre el cliente con la cuenta.
 - [ ] **Con otra cuenta ya en el cfg:** con un `nextcloud.cfg` que tenga otra cuenta, hacer el alta.
       La cuenta anterior se conserva y la nueva aparece con el siguiente índice.
 - [ ] **Repetir el alta:** volver a pulsar Conectar con el mismo usuario. No se duplica la cuenta en
       el cfg (`grep -c dav_user ~/.config/Nextcloud/nextcloud.cfg`) ni el marcador de Dolphin.
-- [ ] **Cliente abierto:** con el cliente Nextcloud en marcha, hacer el alta. Se cierra solo y vuelve
+- [x] **Cliente abierto:** con el cliente Nextcloud en marcha, hacer el alta. Se cierra solo y vuelve
       a abrirse con la cuenta nueva, sin pisar la configuración.
-- [ ] **Sin contraseña:** tras el alta, el cliente NO pide contraseña (KWallet correcto).
+- [x] **Sin contraseña:** tras el alta, el cliente NO pide contraseña (KWallet correcto).
+- [ ] **Carpetas grandes:** en un alta nueva, las carpetas de más de 500 MB (p. ej. `INSTITUTO`)
+      se sincronizan sin pedir confirmación; en `nextcloud.cfg`, `[General]` tiene
+      `useNewBigFolderSizeLimit=false`.
 - [ ] **Marcador:** en Dolphin aparece «Cloud - usuario» en Lugares, con icono de nube.
 
 ## Espera y red
