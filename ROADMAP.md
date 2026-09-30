@@ -20,6 +20,15 @@ y reintentos de red en el sondeo, y cierre del cliente Nextcloud antes de config
 
 ## Robustez
 
+### Revisar la rama `fix/nextcloud-34-compat`
+- **Qué:** rama en GitHub con 16 commits del 2026-09-18 que nunca se fusionaron en `main`
+  (más tiempo para el SSO de EducaMadrid, rechazar carpetas de sincronización no vacías en
+  cuentas nuevas, activar el backend de KWallet configurado, workflows de binarios
+  EndeavourOS/portable, entre otros). Parte ya está cubierta por 0.3.0 por otra vía.
+- **Por qué importa:** puede traer arreglos que `main` no tiene; si no, conviene borrarla.
+- **Estado:** PENDIENTE de revisar commit a commit. No se fusionó al publicar 0.3.0 para no
+  cambiar el código ya probado.
+
 ### El alta no es transaccional
 - **Qué:** el orden es carpeta, `nextcloud.cfg`, KWallet, marcador de Dolphin y arranque. Si falla
   un paso intermedio, los anteriores quedan aplicados y la interfaz solo muestra un error general.
