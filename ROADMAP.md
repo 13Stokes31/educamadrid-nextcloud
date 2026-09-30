@@ -10,13 +10,8 @@ y reintentos de red en el sondeo, y cierre del cliente Nextcloud antes de config
 
 ## Publicación
 
-### Publicar v0.3.0 en GitHub y en AUR
-- **Qué:** hacer público el repo `13Stokes31/educamadrid-nextcloud`, crear la etiqueta y la
-  release `v0.3.0` y subir los paquetes `educamadrid-nextcloud` y `-bin` al AUR.
-- **Por qué:** los ficheros de empaquetado ya están; los `sha256sums` están en `SKIP` hasta
-  que exista la release.
-- **Estado:** PENDIENTE, tras la prueba real (ver `TESTING.md`). Pasos en el README, «Publicar
-  una versión».
+v0.3.0 publicada el 2026-09-30: repo público, release con binario y paquetes AUR
+`educamadrid-nextcloud` y `educamadrid-nextcloud-bin`. Queda la casilla de `yay -S` en `TESTING.md`.
 
 ## Robustez
 
