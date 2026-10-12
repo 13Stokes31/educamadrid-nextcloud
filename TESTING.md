@@ -33,4 +33,4 @@ sin copia de `~/.config/Nextcloud/nextcloud.cfg`.
 
 - [x] **Lanzador:** tras instalar el paquete, «Nube Educamadrid» aparece en el menú con icono de
       nube y la ventana se agrupa bien en la barra de tareas.
-- [ ] `yay -S educamadrid-nextcloud-bin` (tras publicar) instala y abre la app.
+- [x] `yay -S educamadrid-nextcloud-bin` (tras publicar) instala y abre la app.

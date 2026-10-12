@@ -11,7 +11,7 @@ y reintentos de red en el sondeo, y cierre del cliente Nextcloud antes de config
 ## Publicación
 
 v0.3.0 publicada el 2026-09-30: repo público, release con binario y paquetes AUR
-`educamadrid-nextcloud` y `educamadrid-nextcloud-bin`. Queda la casilla de `yay -S` en `TESTING.md`.
+`educamadrid-nextcloud` y `educamadrid-nextcloud-bin`. Instalación desde AUR comprobada el 2026-10-12.
 
 ## Robustez
 
