@@ -15,15 +15,6 @@ v0.3.0 publicada el 2026-09-30: repo público, release con binario y paquetes AU
 
 ## Robustez
 
-### Revisar la rama `fix/nextcloud-34-compat`
-- **Qué:** rama en GitHub con 16 commits del 2026-09-18 que nunca se fusionaron en `main`
-  (más tiempo para el SSO de EducaMadrid, rechazar carpetas de sincronización no vacías en
-  cuentas nuevas, activar el backend de KWallet configurado, workflows de binarios
-  EndeavourOS/portable, entre otros). Parte ya está cubierta por 0.3.0 por otra vía.
-- **Por qué importa:** puede traer arreglos que `main` no tiene; si no, conviene borrarla.
-- **Estado:** PENDIENTE de revisar commit a commit. No se fusionó al publicar 0.3.0 para no
-  cambiar el código ya probado.
-
 ### El alta no es transaccional
 - **Qué:** el orden es carpeta, `nextcloud.cfg`, KWallet, marcador de Dolphin y arranque. Si falla
   un paso intermedio, los anteriores quedan aplicados y la interfaz solo muestra un error general.
@@ -46,3 +37,10 @@ v0.3.0 publicada el 2026-09-30: repo público, release con binario y paquetes AU
 ## Descartado por ahora
 
 - **Soporte de GNOME / libsecret:** descartado por ahora, uso solo en Plasma.
+- **Rama `fix/nextcloud-34-compat`** (16 commits del 2026-09-18, PR #1): revisada commit a commit
+  el 2026-10-12 y borrada; su último commit era `5fd5910`. Trece commits ya estaban cubiertos por
+  0.3.0 o habían quedado obsoletos. Lo único que `main` no tiene, y no se adoptó:
+  - Ampliar la espera del inicio de sesión de 5 a 10 minutos.
+  - Reconocer una cuenta existente que solo tenga `webflow_user`, sin `dav_user`.
+  - Rechazar la carpeta `~/Cloud - <usuario>` si ya contiene archivos. Se reutiliza a propósito:
+    el caso normal es volver a dar de alta la propia cuenta con su carpeta de siempre.
